@@ -61,7 +61,7 @@ func Run(parent context.Context, token string) error {
 
 				go func() {
 					ticker := time.NewTicker(1 * time.Minute)
-					last, err := search(args, "", func(string) error { return nil })
+					last, err := search(args, nil, func(string) error { return nil })
 					if err != nil {
 						log.Println(err)
 						bot.Send(tgbot.NewMessage(chatID, err.Error()))
@@ -69,7 +69,7 @@ func Run(parent context.Context, token string) error {
 					}
 					for {
 						fmt.Println("Searching newest...")
-						last, err = search(args, last, func(text string) error {
+						curr, err := search(args, last, func(text string) error {
 							msg := tgbot.NewMessage(chatID, text)
 							bot.Send(msg)
 							return nil
@@ -77,6 +77,8 @@ func Run(parent context.Context, token string) error {
 						if err != nil {
 							log.Println(err)
 							bot.Send(tgbot.NewMessage(chatID, err.Error()))
+						} else {
+							last = curr
 						}
 						select {
 						case <-ticker.C:
@@ -102,6 +104,7 @@ func Run(parent context.Context, token string) error {
 							})
 							if err != nil {
 								log.Println(err)
+								bot.Send(tgbot.NewMessage(chatID, err.Error()))
 							}
 							if n == 0 {
 								break
@@ -170,35 +173,36 @@ type Images struct {
 	Original string `json:"original"`
 }
 
-func search(keywords string, lastID string, callback func(string) error) (string, error) {
+func search(keywords string, last map[string]struct{}, callback func(string) error) (map[string]struct{}, error) {
+	curr := make(map[string]struct{})
 	client := &http.Client{Timeout: 10 * time.Second}
 	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?time_filter=today&keywords=%s&order_by=newest", keywords)
 	r, err := client.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("get request failed: %w", err)
+		return nil, fmt.Errorf("get request failed: %w", err)
 	}
 	if r.StatusCode != 200 {
-		return "", fmt.Errorf("invalid status code: %s", r.Status)
+		return nil, fmt.Errorf("invalid status code: %s", r.Status)
 	}
 	defer r.Body.Close()
 	var resp Response
 	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
-		return "", fmt.Errorf("couldn't decode json: %w", err)
+		return nil, fmt.Errorf("couldn't decode json: %w", err)
 	}
 	for _, obj := range resp.Objects {
-		fmt.Println(obj.Id)
-		if obj.ID() <= lastID {
-			break
+		id := obj.ID()
+		curr[id] = struct{}{}
+		if last != nil {
+			if _, ok := last[id]; ok {
+				continue
+			}
 		}
 		msg := fmt.Sprintf("%d€ %s %s", int(obj.Price), obj.Title, obj.Link())
 		if err := callback(msg); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
-	if len(resp.Objects) == 0 {
-		return lastID, nil
-	}
-	return resp.Objects[0].ID(), nil
+	return curr, nil
 }
 
 func changes(keywords string, start int, objs map[string]float64, callback func(string) error) (int, error) {
