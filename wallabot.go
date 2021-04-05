@@ -2,32 +2,59 @@ package wallabot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
 	tgbot "github.com/go-telegram-bot-api/telegram-bot-api"
+	"github.com/igolaizola/wallabot/internal/api"
+	"github.com/igolaizola/wallabot/internal/store"
 )
-
-var procs = map[string]*proc{}
 
 type proc struct {
 	name   string
 	cancel context.CancelFunc
 }
 
-func Run(parent context.Context, token string) error {
-	bot, err := tgbot.NewBotAPI(token)
+type bot struct {
+	*tgbot.BotAPI
+	db    *store.Store
+	procs map[string]*proc
+	admin int64
+	chat  string
+}
+
+func Run(ctx context.Context, token, dbPath string, admin int, chat string) error {
+	db, err := store.New(dbPath)
 	if err != nil {
-		log.Panic(err)
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	botAPI, err := tgbot.NewBotAPI(token)
+	if err != nil {
+		return fmt.Errorf("couldn't create bot api: %w", err)
+	}
+	botAPI.Debug = true
+	bot := &bot{
+		BotAPI: botAPI,
+		db:     db,
+		procs:  make(map[string]*proc),
+		admin:  int64(admin),
+		chat:   chat,
 	}
 
-	bot.Debug = true
+	bot.log(fmt.Sprintf("wallabot started, bot %s", bot.Self.UserName))
+	defer bot.log(fmt.Sprintf("wallabot stoped, bot %s", bot.Self.UserName))
 
-	log.Printf("Authorized on account %s", bot.Self.UserName)
+	keys, err := db.Keys()
+	if err != nil {
+		bot.log(fmt.Errorf("couldn't get keys: %w", err))
+	}
+	for _, k := range keys {
+		bot.search(ctx, k)
+	}
 
 	u := tgbot.NewUpdate(0)
 	u.Timeout = 60
@@ -38,193 +65,119 @@ func Run(parent context.Context, token string) error {
 		if update.Message == nil {
 			continue
 		}
-		chatID := update.Message.Chat.ID
+		if update.Message.Chat.ID != bot.admin {
+			continue
+		}
 		if update.Message.IsCommand() {
+			args := update.Message.CommandArguments()
 			switch update.Message.Command() {
 			case "search":
-				args := update.Message.CommandArguments()
-				if len(args) < 1 {
-					msg := tgbot.NewMessage(chatID, "Search arguments not provided")
-					bot.Send(msg)
+				if args == "" {
+					bot.log("search arguments not provided")
 					break
 				}
-				pID := fmt.Sprintf("%d_%s", chatID, args)
-				if p, ok := procs[pID]; ok {
-					p.cancel()
-				}
-
-				ctx, cancel := context.WithCancel(parent)
-				procs[pID] = &proc{name: args, cancel: cancel}
-
-				msg := tgbot.NewMessage(chatID, fmt.Sprintf("Searching %s", args))
-				bot.Send(msg)
-
-				go func() {
-					ticker := time.NewTicker(1 * time.Minute)
-					objs := make(map[string]struct{})
-					if err := search(args, objs, func(string) error { return nil }); err != nil {
-						log.Println(err)
-						bot.Send(tgbot.NewMessage(chatID, err.Error()))
-						return
-					}
-					for {
-						fmt.Println("Searching newest...")
-						if err := search(args, objs, func(text string) error {
-							msg := tgbot.NewMessage(chatID, text)
-							bot.Send(msg)
-							return nil
-						}); err != nil {
-							log.Println(err)
-							bot.Send(tgbot.NewMessage(chatID, err.Error()))
-						}
-						select {
-						case <-ticker.C:
-						case <-ctx.Done():
-							ticker.Stop()
-							return
-						}
-					}
-				}()
-				go func() {
-					ticker := time.NewTicker(1 * time.Minute)
-					objs := make(map[string]float64)
-					for {
-						fmt.Println("Searching price changes...")
-						start := 0
-						for {
-							<-time.After(1 * time.Second)
-							fmt.Println("Searching price changes", start)
-							n, err := changes(args, start, objs, func(text string) error {
-								msg := tgbot.NewMessage(chatID, text)
-								bot.Send(msg)
-								return nil
-							})
-							if err != nil {
-								log.Println(err)
-								bot.Send(tgbot.NewMessage(chatID, err.Error()))
-							}
-							if n == 0 {
-								break
-							}
-							start += n
-						}
-						select {
-						case <-ticker.C:
-						case <-ctx.Done():
-							ticker.Stop()
-							return
-						}
-					}
-				}()
+				bot.search(ctx, args)
 			case "status":
-				for _, p := range procs {
-					msg := tgbot.NewMessage(chatID, fmt.Sprintf("Running %s", p.name))
-					bot.Send(msg)
+				bot.log("status info:")
+				for _, p := range bot.procs {
+					bot.log(fmt.Sprintf("running %s", p.name))
 				}
 			case "stop":
-				args := update.Message.CommandArguments()
-				if len(args) < 1 {
-					msg := tgbot.NewMessage(update.Message.Chat.ID, "Stopping all")
-					bot.Send(msg)
-					for _, p := range procs {
-						p.cancel()
-					}
-				}
-				chatID := update.Message.Chat.ID
-				pID := fmt.Sprintf("%d_%s", chatID, args)
-				if p, ok := procs[pID]; ok {
-					msg := tgbot.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Stopping %s", args))
-					bot.Send(msg)
-					p.cancel()
-				}
+				bot.stop(args)
 			}
 		}
 	}
 	return nil
 }
 
-type Response struct {
-	Objects []Object `json:"search_objects"`
-}
-
-type Object struct {
-	Id          string  `json:"id"`
-	Title       string  `json:"title"`
-	Price       float64 `json:"price"`
-	Currency    string  `json:"currency"`
-	Description string  `json:"description"`
-	Distance    float64 `json:"distance"`
-	WebSlug     string  `json:"web_slug"`
-}
-
-func (o Object) Link() string {
-	return fmt.Sprintf("http://p.wallapop.com/i/%s", o.ID())
-}
-
-func (o Object) ID() string {
-	split := strings.Split(o.WebSlug, "-")
-	return split[len(split)-1]
-}
-
-type Images struct {
-	Original string `json:"original"`
-}
-
-func search(keywords string, objs map[string]struct{}, callback func(string) error) error {
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?time_filter=today&keywords=%s&order_by=newest", keywords)
-	r, err := client.Get(url)
-	if err != nil {
-		return fmt.Errorf("get request failed: %w", err)
+func (b *bot) search(ctx context.Context, args string) {
+	if args == "" {
+		return
 	}
-	if r.StatusCode != 200 {
-		return fmt.Errorf("invalid status code: %s", r.Status)
+	if p, ok := b.procs[args]; ok {
+		p.cancel()
 	}
-	defer r.Body.Close()
-	var resp Response
-	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
-		return fmt.Errorf("couldn't decode json: %w", err)
-	}
-	for _, obj := range resp.Objects {
-		id := obj.ID()
-		if _, ok := objs[id]; ok {
-			continue
+
+	ctx, cancel := context.WithCancel(ctx)
+	b.procs[args] = &proc{name: args, cancel: cancel}
+
+	go func() {
+		items := make(map[string]api.Item)
+		if err := b.db.Get(args, &items); err != nil {
+			b.log(err)
+			return
 		}
-		objs[id] = struct{}{}
-		msg := fmt.Sprintf("%d€ %s %s", int(obj.Price), obj.Title, obj.Link())
-		if err := callback(msg); err != nil {
-			return err
+		b.log(fmt.Sprintf("searching %s, %d items loaded", args, len(items)))
+		ticker := time.NewTicker(1 * time.Minute)
+		if err := api.Search(args, items, func(api.Item) error { return nil }); err != nil {
+			b.log(err)
+			return
 		}
-	}
-	return nil
+		for {
+			if err := api.Search(args, items, func(i api.Item) error {
+				text := newAdMessage(i)
+				if i.PreviousPrice > i.Price {
+					text = priceDownMessage(i)
+				}
+				b.message(text)
+				return nil
+			}); err != nil {
+				b.log(err)
+			}
+			if err := b.db.Put(args, items); err != nil {
+				b.log(err)
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			}
+		}
+	}()
 }
 
-func changes(keywords string, start int, objs map[string]float64, callback func(string) error) (int, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
-	r, err := client.Get(url)
-	if err != nil {
-		return 0, fmt.Errorf("get request failed: %w", err)
-	}
-	if r.StatusCode != 200 {
-		return 0, fmt.Errorf("invalid status code: %s", r.Status)
-	}
-	defer r.Body.Close()
-	var resp Response
-	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
-		return 0, fmt.Errorf("couldn't decode json: %w", err)
-	}
-	for _, obj := range resp.Objects {
-		id := obj.ID()
-		prev, ok := objs[id]
-		objs[id] = obj.Price
-		if !ok || prev == obj.Price {
-			continue
-		}
-		msg := fmt.Sprintf("%d->%d€ %s %s", int(prev), int(obj.Price), obj.Title, obj.Link())
-		if err := callback(msg); err != nil {
-			return 0, err
+func (b *bot) stop(args string) {
+	if len(args) < 1 {
+		b.log("stopping all")
+		for k, p := range b.procs {
+			b.log(fmt.Sprintf("stopping %s", k))
+			p.cancel()
+			delete(b.procs, k)
 		}
 	}
-	return len(resp.Objects), nil
+	if p, ok := b.procs[args]; ok {
+		b.log(fmt.Sprintf("stopping %s", args))
+		p.cancel()
+		delete(b.procs, args)
+	}
+}
+
+func (b *bot) message(text string) {
+	msg := tgbot.NewMessageToChannel(b.chat, text)
+	if chatID, err := strconv.Atoi(b.chat); err == nil {
+		msg = tgbot.NewMessage(int64(chatID), text)
+	}
+	if _, err := b.Send(msg); err != nil {
+		b.log(fmt.Errorf("couldn't send message to channel %s: %w", b.chat, err))
+	}
+}
+
+func (b *bot) log(obj interface{}) {
+	text := fmt.Sprintf("%s", obj)
+	log.Println(text)
+	if _, err := b.Send(tgbot.NewMessage(b.admin, text)); err != nil {
+		log.Println(fmt.Errorf("couldn't send error to admin %d: %w", b.admin, err))
+	}
+}
+
+func newAdMessage(i api.Item) string {
+	return fmt.Sprintf("‼️ NUEVO ANUNCIO\n\n%s\n\n✅ Precio: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en @stadiapop",
+		i.Title, i.Price, i.Link)
+}
+
+func priceDownMessage(i api.Item) string {
+	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en @stadiapop",
+		i.Title, i.Price, i.PreviousPrice, i.Link)
 }
