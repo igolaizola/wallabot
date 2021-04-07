@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,11 +33,32 @@ type object struct {
 	WebSlug     string  `json:"web_slug"`
 }
 
-func Search(keywords string, items map[string]Item, callback func(Item) error) error {
+type Client struct {
+	client *http.Client
+	ctx    context.Context
+}
+
+func New(ctx context.Context) *Client {
+	return &Client{
+		ctx: ctx,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &transport{
+				ctx: ctx,
+			},
+		},
+	}
+}
+
+func (c *Client) Search(keywords string, items map[string]Item, callback func(Item) error) error {
 	start := 0
 	for {
-		<-time.After(1 * time.Second)
-		n, err := search(keywords, start, items, callback)
+		select {
+		case <-c.ctx.Done():
+			return nil
+		default:
+		}
+		n, err := c.search(keywords, start, items, callback)
 		if err != nil {
 			return err
 		}
@@ -47,10 +70,9 @@ func Search(keywords string, items map[string]Item, callback func(Item) error) e
 	return nil
 }
 
-func search(keywords string, start int, items map[string]Item, callback func(Item) error) (int, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+func (c *Client) search(keywords string, start int, items map[string]Item, callback func(Item) error) (int, error) {
 	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
-	r, err := client.Get(url)
+	r, err := c.client.Get(url)
 	if err != nil {
 		return 0, fmt.Errorf("api: get request failed: %w", err)
 	}
@@ -86,4 +108,21 @@ func search(keywords string, start int, items map[string]Item, callback func(Ite
 
 	}
 	return len(resp.Objects), nil
+}
+
+type transport struct {
+	lock sync.Mutex
+	ctx  context.Context
+}
+
+func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.lock.Lock()
+	defer func() {
+		select {
+		case <-t.ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+		t.lock.Unlock()
+	}()
+	return http.DefaultTransport.RoundTrip(r)
 }

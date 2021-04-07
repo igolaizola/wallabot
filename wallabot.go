@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
 	"time"
 
 	tgbot "github.com/go-telegram-bot-api/telegram-bot-api"
@@ -19,10 +20,12 @@ type proc struct {
 
 type bot struct {
 	*tgbot.BotAPI
-	db    *store.Store
-	procs map[string]*proc
-	admin int64
-	chat  string
+	db     *store.Store
+	procs  map[string]*proc
+	admin  int64
+	chat   string
+	client *api.Client
+	wg     sync.WaitGroup
 }
 
 func Run(ctx context.Context, token, dbPath string, admin int, chat string) error {
@@ -37,9 +40,11 @@ func Run(ctx context.Context, token, dbPath string, admin int, chat string) erro
 		return fmt.Errorf("couldn't create bot api: %w", err)
 	}
 	botAPI.Debug = true
+
 	bot := &bot{
 		BotAPI: botAPI,
 		db:     db,
+		client: api.New(ctx),
 		procs:  make(map[string]*proc),
 		admin:  int64(admin),
 		chat:   chat,
@@ -61,7 +66,14 @@ func Run(ctx context.Context, token, dbPath string, admin int, chat string) erro
 
 	updates, err := bot.GetUpdatesChan(u)
 
-	for update := range updates {
+	for {
+		var update tgbot.Update
+		select {
+		case <-ctx.Done():
+			bot.wg.Wait()
+			return nil
+		case update = <-updates:
+		}
 		if update.Message == nil {
 			continue
 		}
@@ -87,7 +99,6 @@ func Run(ctx context.Context, token, dbPath string, admin int, chat string) erro
 			}
 		}
 	}
-	return nil
 }
 
 func (b *bot) search(ctx context.Context, args string) {
@@ -101,7 +112,9 @@ func (b *bot) search(ctx context.Context, args string) {
 	ctx, cancel := context.WithCancel(ctx)
 	b.procs[args] = &proc{name: args, cancel: cancel}
 
+	b.wg.Add(1)
 	go func() {
+		defer b.wg.Done()
 		items := make(map[string]api.Item)
 		if err := b.db.Get(args, &items); err != nil {
 			b.log(err)
@@ -109,12 +122,12 @@ func (b *bot) search(ctx context.Context, args string) {
 		}
 		b.log(fmt.Sprintf("searching %s, %d items loaded", args, len(items)))
 		ticker := time.NewTicker(1 * time.Minute)
-		if err := api.Search(args, items, func(api.Item) error { return nil }); err != nil {
+		if err := b.client.Search(args, items, func(api.Item) error { return nil }); err != nil {
 			b.log(err)
 			return
 		}
 		for {
-			if err := api.Search(args, items, func(i api.Item) error {
+			if err := b.client.Search(args, items, func(i api.Item) error {
 				text := newAdMessage(i)
 				if i.PreviousPrice > i.Price {
 					text = priceDownMessage(i)
