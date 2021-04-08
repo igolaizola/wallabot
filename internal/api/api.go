@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -59,6 +61,10 @@ func (c *Client) Search(keywords string, items map[string]Item, callback func(It
 		default:
 		}
 		n, err := c.search(keywords, start, items, callback)
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			continue
+		}
 		if err != nil {
 			return err
 		}

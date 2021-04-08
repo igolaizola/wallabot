@@ -149,9 +149,11 @@ func (b *bot) search(ctx context.Context, args string) {
 			}); err != nil {
 				b.log(err)
 			}
-			if err := b.db.Put(args, items); err != nil {
-				b.log(err)
-				return
+			if len(items) > 0 {
+				if err := b.db.Put(args, items); err != nil {
+					b.log(err)
+					return
+				}
 			}
 			select {
 			case <-ticker.C:
