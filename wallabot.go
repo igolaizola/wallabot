@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,12 +24,11 @@ type bot struct {
 	db     *store.Store
 	procs  map[string]*proc
 	admin  int64
-	chat   string
 	client *api.Client
 	wg     sync.WaitGroup
 }
 
-func Run(ctx context.Context, token, dbPath string, admin int, chat string) error {
+func Run(ctx context.Context, token, dbPath string, admin int) error {
 	db, err := store.New(dbPath)
 	if err != nil {
 		log.Fatal(err)
@@ -47,7 +47,6 @@ func Run(ctx context.Context, token, dbPath string, admin int, chat string) erro
 		client: api.New(ctx),
 		procs:  make(map[string]*proc),
 		admin:  int64(admin),
-		chat:   chat,
 	}
 
 	bot.log(fmt.Sprintf("wallabot started, bot %s", bot.Self.UserName))
@@ -88,6 +87,9 @@ func Run(ctx context.Context, token, dbPath string, admin int, chat string) erro
 					bot.log("search arguments not provided")
 					break
 				}
+				if len(strings.Split(args, "/")) < 2 {
+					args = fmt.Sprintf("%d/%s", update.Message.Chat.ID, args)
+				}
 				bot.search(ctx, args)
 			case "status":
 				bot.log("status info:")
@@ -112,6 +114,14 @@ func (b *bot) search(ctx context.Context, args string) {
 	ctx, cancel := context.WithCancel(ctx)
 	b.procs[args] = &proc{name: args, cancel: cancel}
 
+	split := strings.Split(args, "/")
+	if len(split) < 2 {
+		b.log(fmt.Sprintf("invalid args %s", args))
+		return
+	}
+	chat := split[0]
+	keywords := split[1]
+
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
@@ -122,17 +132,19 @@ func (b *bot) search(ctx context.Context, args string) {
 		}
 		b.log(fmt.Sprintf("searching %s, %d items loaded", args, len(items)))
 		ticker := time.NewTicker(1 * time.Minute)
-		if err := b.client.Search(args, items, func(api.Item) error { return nil }); err != nil {
-			b.log(err)
-			return
+		if len(items) == 0 {
+			if err := b.client.Search(keywords, items, func(api.Item) error { return nil }); err != nil {
+				b.log(err)
+				return
+			}
 		}
 		for {
-			if err := b.client.Search(args, items, func(i api.Item) error {
-				text := newAdMessage(i)
+			if err := b.client.Search(keywords, items, func(i api.Item) error {
+				text := newAdMessage(i, chat)
 				if i.PreviousPrice > i.Price {
-					text = priceDownMessage(i)
+					text = priceDownMessage(i, chat)
 				}
-				b.message(text)
+				b.message(chat, text)
 				return nil
 			}); err != nil {
 				b.log(err)
@@ -167,13 +179,13 @@ func (b *bot) stop(args string) {
 	}
 }
 
-func (b *bot) message(text string) {
-	msg := tgbot.NewMessageToChannel(b.chat, text)
-	if chatID, err := strconv.Atoi(b.chat); err == nil {
+func (b *bot) message(chat, text string) {
+	msg := tgbot.NewMessageToChannel(chat, text)
+	if chatID, err := strconv.Atoi(chat); err == nil {
 		msg = tgbot.NewMessage(int64(chatID), text)
 	}
 	if _, err := b.Send(msg); err != nil {
-		b.log(fmt.Errorf("couldn't send message to channel %s: %w", b.chat, err))
+		b.log(fmt.Errorf("couldn't send message to channel %s: %w", chat, err))
 	}
 }
 
@@ -185,12 +197,12 @@ func (b *bot) log(obj interface{}) {
 	}
 }
 
-func newAdMessage(i api.Item) string {
-	return fmt.Sprintf("‼️ NUEVO ANUNCIO\n\n%s\n\n✅ Precio: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en @stadiapop",
-		i.Title, i.Price, i.Link)
+func newAdMessage(i api.Item, chat string) string {
+	return fmt.Sprintf("‼️ NUEVO ANUNCIO\n\n%s\n\n✅ Precio: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en %s",
+		i.Title, i.Price, i.Link, chat)
 }
 
-func priceDownMessage(i api.Item) string {
-	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en @stadiapop",
-		i.Title, i.Price, i.PreviousPrice, i.Link)
+func priceDownMessage(i api.Item, chat string) string {
+	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s\n\n📣 Más anuncios en %s",
+		i.Title, i.Price, i.PreviousPrice, i.Link, chat)
 }
