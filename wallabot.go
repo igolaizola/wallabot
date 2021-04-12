@@ -150,8 +150,8 @@ func parseArgs(args string, user int) (parsedArgs, error) {
 		p.chat = split[0]
 		p.query = split[1]
 	}
-	p.chat = strings.ToLower(strings.Trim(p.chat, ""))
-	p.query = strings.ReplaceAll(strings.ToLower(p.query), " ", "+")
+	p.chat = strings.ToLower(strings.Trim(p.chat, " "))
+	p.query = strings.ReplaceAll(strings.Trim(strings.ToLower(p.query), " "), " ", "+")
 	p.id = fmt.Sprintf("%s/%s", p.chat, p.query)
 	return p, nil
 }
