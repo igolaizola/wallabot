@@ -77,6 +77,9 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			continue
 		}
+		if errors.Is(err, errBadGateway) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -88,11 +91,16 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 	return nil
 }
 
+var errBadGateway = errors.New("api: 502 bad gateway")
+
 func (c *Client) search(keywords string, excludes []string, start int, items map[string]Item, callback func(Item) error) (int, error) {
 	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
 	r, err := c.client.Get(url)
 	if err != nil {
 		return 0, fmt.Errorf("api: get request failed: %w", err)
+	}
+	if r.StatusCode == 502 {
+		return 0, errBadGateway
 	}
 	if r.StatusCode != 200 {
 		return 0, fmt.Errorf("api: invalid status code: %s", r.Status)
