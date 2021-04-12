@@ -157,7 +157,7 @@ func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	defer func() {
 		select {
 		case <-t.ctx.Done():
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(1000 * time.Millisecond):
 		}
 		t.lock.Unlock()
 	}()

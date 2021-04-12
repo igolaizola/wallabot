@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,18 +16,15 @@ import (
 	"github.com/igolaizola/wallabot/internal/store"
 )
 
-type proc struct {
-	cancel context.CancelFunc
-}
-
 type bot struct {
 	*tgbot.BotAPI
-	db     *store.Store
-	procs  map[string]*proc
-	dups   map[string]struct{}
-	admin  int
-	client *api.Client
-	wg     sync.WaitGroup
+	db      *store.Store
+	searchs sync.Map
+	dups    sync.Map
+	admin   int
+	client  *api.Client
+	wg      sync.WaitGroup
+	elapsed time.Duration
 }
 
 func Run(ctx context.Context, token, dbPath string, admin int, users []int) error {
@@ -35,7 +34,12 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	}
 	defer db.Close()
 
-	botAPI, err := tgbot.NewBotAPI(token)
+	client := &http.Client{
+		Transport: &transport{
+			ctx: ctx,
+		},
+	}
+	botAPI, err := tgbot.NewBotAPIWithClient(token, client)
 	if err != nil {
 		return fmt.Errorf("couldn't create bot api: %w", err)
 	}
@@ -51,37 +55,74 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		BotAPI: botAPI,
 		db:     db,
 		client: api.New(ctx),
-		procs:  make(map[string]*proc),
 		admin:  admin,
-		dups:   make(map[string]struct{}),
 	}
 
 	bot.log(fmt.Sprintf("wallabot started, bot %s", bot.Self.UserName))
 	defer bot.log(fmt.Sprintf("wallabot stoped, bot %s", bot.Self.UserName))
+	defer bot.wg.Wait()
 
-	keys, err := db.Keys()
 	if err != nil {
 		bot.log(fmt.Errorf("couldn't get keys: %w", err))
 	}
+	keys, err := db.Keys()
 	for _, k := range keys {
-		parsed, err := parseArgs(k, 0)
-		if err != nil {
+		if _, err := parseArgs(k, 0); err != nil {
 			bot.log(fmt.Errorf("couldn't parse key %s: %w", k, err))
 			continue
 		}
-		bot.search(ctx, parsed)
+		bot.searchs.Store(k, struct{}{})
+		bot.log(fmt.Sprintf("loaded from db: %s", k))
 	}
+
+	bot.wg.Add(1)
+	go func() {
+		defer log.Println("search routine finished")
+		defer bot.wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			start := time.Now()
+			var keys []string
+			bot.searchs.Range(func(k interface{}, _ interface{}) bool {
+				keys = append(keys, k.(string))
+				return true
+			})
+
+			sort.Strings(keys)
+			for _, k := range keys {
+				log.Println(fmt.Sprintf("searching: %s", k))
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if _, ok := bot.searchs.Load(k); !ok {
+					continue
+				}
+				parsed, err := parseArgs(k, 0)
+				if err != nil {
+					bot.log(fmt.Errorf("couldn't parse key %s: %w", k, err))
+					continue
+				}
+				bot.search(ctx, parsed)
+			}
+			bot.elapsed = time.Since(start)
+			log.Println(fmt.Sprintf("elapsed: %s", bot.elapsed))
+		}
+	}()
 
 	u := tgbot.NewUpdate(0)
 	u.Timeout = 60
-
 	updates, err := bot.GetUpdatesChan(u)
-
 	for {
 		var update tgbot.Update
 		select {
 		case <-ctx.Done():
-			bot.wg.Wait()
+			log.Println("stopping bot")
 			return nil
 		case update = <-updates:
 		}
@@ -103,14 +144,17 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				parsed, err := parseArgs(args, user)
 				if err != nil {
 					bot.message(user, err.Error())
+				} else {
+					bot.searchs.Store(parsed.id, struct{}{})
 				}
-				bot.search(ctx, parsed)
 				bot.message(user, fmt.Sprintf("searching %s", parsed.id))
 			case "status":
 				bot.message(user, "status info:")
-				for k := range bot.procs {
-					bot.message(user, fmt.Sprintf("running %s", k))
-				}
+				bot.searchs.Range(func(k interface{}, _ interface{}) bool {
+					bot.message(user, fmt.Sprintf("running %s", k.(string)))
+					return true
+				})
+				bot.log(fmt.Sprintf("elapsed: %s", bot.elapsed))
 			case "stop":
 				if args == "" {
 					bot.message(user, "stop arguments not provided")
@@ -160,83 +204,70 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 	if parsed.query == "" {
 		return
 	}
-	if p, ok := b.procs[parsed.id]; ok {
-		p.cancel()
+
+	items := make(map[string]api.Item)
+	if err := b.db.Get(parsed.id, &items); err != nil {
+		b.log(err)
+		return
 	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	b.procs[parsed.id] = &proc{cancel: cancel}
-
-	b.wg.Add(1)
-	go func() {
-		defer b.wg.Done()
-		items := make(map[string]api.Item)
-		if err := b.db.Get(parsed.id, &items); err != nil {
+	if len(items) == 0 {
+		// store search with empty items on db
+		if err := b.db.Put(parsed.id, items); err != nil {
 			b.log(err)
 			return
 		}
-		b.log(fmt.Sprintf("searching %s, %d items loaded", parsed.id, len(items)))
-		ticker := time.NewTicker(1 * time.Minute)
-		if len(items) == 0 {
-			// store search with empty items on db
-			if err := b.db.Put(parsed.id, items); err != nil {
-				b.log(err)
-				return
-			}
-			if err := b.client.Search(parsed.query, items, func(api.Item) error { return nil }); err != nil {
-				b.log(err)
-				return
-			}
+		if err := b.client.Search(parsed.query, items, func(api.Item) error { return nil }); err != nil {
+			b.log(err)
+			return
 		}
-		for {
-			if err := b.client.Search(parsed.query, items, func(i api.Item) error {
-				dupID := fmt.Sprintf("%s/%s/%.2f-%.2f", parsed.chat, i.ID, i.Price, i.PreviousPrice)
-				// TODO(igolaizola): sync this
-				if _, ok := b.dups[dupID]; ok {
-					return nil
-				}
-				text := newAdMessage(i, parsed.chat)
-				if i.PreviousPrice > i.Price {
-					text = priceDownMessage(i, parsed.chat)
-				}
-				b.message(parsed.chat, text)
-				b.dups[dupID] = struct{}{}
-				return nil
-			}); err != nil {
-				b.log(err)
-			}
-			if len(items) > 0 {
-				if err := b.db.Put(parsed.id, items); err != nil {
-					b.log(err)
-					return
-				}
-			}
-			select {
-			case <-ticker.C:
-			case <-ctx.Done():
-				ticker.Stop()
-				return
-			}
+	}
+	if err := b.client.Search(parsed.query, items, func(i api.Item) error {
+		dupID := fmt.Sprintf("%s/%s/%.2f-%.2f", parsed.chat, i.ID, i.Price, i.PreviousPrice)
+		// TODO(igolaizola): sync this
+		if _, ok := b.dups.Load(dupID); ok {
+			return nil
 		}
-	}()
+		text := newAdMessage(i, parsed.chat)
+		if i.PreviousPrice > i.Price {
+			text = priceDownMessage(i, parsed.chat)
+		}
+		b.message(parsed.chat, text)
+		b.dups.Store(dupID, struct{}{})
+		return nil
+	}); err != nil {
+		b.log(err)
+	}
+	if len(items) == 0 {
+		return
+	}
+	if _, ok := b.searchs.Load(parsed.id); !ok {
+		return
+	}
+	if err := b.db.Put(parsed.id, items); err != nil {
+		b.log(err)
+		return
+	}
 }
 
 func (b *bot) stopAll() {
 	b.log("stopping all")
-	for k, p := range b.procs {
+	var keys []string
+	b.searchs.Range(func(k interface{}, _ interface{}) bool {
+		keys = append(keys, k.(string))
+		return true
+	})
+	for _, k := range keys {
 		b.log(fmt.Sprintf("stopping %s", k))
-		p.cancel()
-		delete(b.procs, k)
+		b.searchs.Delete(k)
 		if err := b.db.Delete(k); err != nil {
 			b.log(err)
 		}
 	}
 }
 func (b *bot) stop(parsed parsedArgs) {
-	if p, ok := b.procs[parsed.id]; ok {
+	if _, ok := b.searchs.Load(parsed.id); ok {
 		b.log(fmt.Sprintf("stopping %s", parsed.id))
-		p.cancel()
-		delete(b.procs, parsed.id)
+		b.searchs.Delete(parsed.id)
 		if err := b.db.Delete(parsed.id); err != nil {
 			b.log(err)
 		}
@@ -284,4 +315,21 @@ func priceDownMessage(i api.Item, chat string) string {
 	}
 	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s%s",
 		i.Title, i.Price, i.PreviousPrice, i.Link, bottom)
+}
+
+type transport struct {
+	lock sync.Mutex
+	ctx  context.Context
+}
+
+func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.lock.Lock()
+	defer func() {
+		select {
+		case <-t.ctx.Done():
+		case <-time.After(100 * time.Millisecond):
+		}
+		t.lock.Unlock()
+	}()
+	return http.DefaultTransport.RoundTrip(r)
 }
