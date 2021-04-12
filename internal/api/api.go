@@ -52,7 +52,19 @@ func New(ctx context.Context) *Client {
 	}
 }
 
-func (c *Client) Search(keywords string, items map[string]Item, callback func(Item) error) error {
+func (c *Client) Search(query string, items map[string]Item, callback func(Item) error) error {
+	keywords := query
+	var excludes []string
+	split := strings.SplitN(query, ":", 2)
+	if len(split) > 1 {
+		keywords = split[0]
+		for _, e := range strings.Split(split[1], "+") {
+			if e == "" {
+				continue
+			}
+			excludes = append(excludes, e)
+		}
+	}
 	start := 0
 	for {
 		select {
@@ -60,7 +72,7 @@ func (c *Client) Search(keywords string, items map[string]Item, callback func(It
 			return nil
 		default:
 		}
-		n, err := c.search(keywords, start, items, callback)
+		n, err := c.search(keywords, excludes, start, items, callback)
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			continue
@@ -76,7 +88,7 @@ func (c *Client) Search(keywords string, items map[string]Item, callback func(It
 	return nil
 }
 
-func (c *Client) search(keywords string, start int, items map[string]Item, callback func(Item) error) (int, error) {
+func (c *Client) search(keywords string, excludes []string, start int, items map[string]Item, callback func(Item) error) (int, error) {
 	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
 	r, err := c.client.Get(url)
 	if err != nil {
@@ -91,6 +103,17 @@ func (c *Client) search(keywords string, start int, items map[string]Item, callb
 		return 0, fmt.Errorf("api: couldn't decode json: %w", err)
 	}
 	for _, obj := range resp.Objects {
+		skip := false
+		for _, e := range excludes {
+			if strings.Contains(strings.ToLower(obj.Title), strings.ToLower(e)) ||
+				strings.Contains(strings.ToLower(obj.Description), strings.ToLower(e)) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
 		split := strings.Split(obj.WebSlug, "-")
 		id := split[len(split)-1]
 		item := Item{

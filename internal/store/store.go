@@ -44,7 +44,7 @@ func (s *Store) Keys() ([]string, error) {
 			return nil
 		})
 	}); err != nil {
-		return nil, fmt.Errorf("store: couldn't view db: %w", err)
+		return nil, fmt.Errorf("store: couldn't get keys: %w", err)
 	}
 	return keys, nil
 }
@@ -60,7 +60,7 @@ func (s *Store) Get(key string, val interface{}) error {
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("store: couldn't view db: %w", err)
+		return fmt.Errorf("store: couldn't get %s: %w", key, err)
 	}
 	return nil
 }
@@ -75,7 +75,17 @@ func (s *Store) Put(key string, val interface{}) error {
 		}
 		return b.Put([]byte(key), buf.Bytes())
 	}); err != nil {
-		return fmt.Errorf("store: couldn't update db: %w", err)
+		return fmt.Errorf("store: couldn't put %s: %w", key, err)
+	}
+	return nil
+}
+
+func (s *Store) Delete(key string) error {
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("db"))
+		return b.Delete([]byte(key))
+	}); err != nil {
+		return fmt.Errorf("store: couldn't delete %s: %w", key, err)
 	}
 	return nil
 }

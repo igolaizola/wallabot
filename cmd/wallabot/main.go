@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 
 	"github.com/igolaizola/wallabot"
 )
@@ -15,6 +17,9 @@ func main() {
 	token := flag.String("token", "", "telegram bot token")
 	db := flag.String("db", "wallabot.db", "database file path")
 	admin := flag.Int("admin", 0, "admin chat id that controls the bot")
+	var users arrayFlags
+	flag.Var(&users, "user", "user chat id allowed to control the bot")
+
 	flag.Parse()
 	if *token == "" {
 		log.Fatal("token not provided")
@@ -41,7 +46,25 @@ func main() {
 	}()
 
 	// Run bot
-	if err := wallabot.Run(ctx, *token, *db, *admin); err != nil {
+	if err := wallabot.Run(ctx, *token, *db, *admin, users); err != nil {
 		log.Fatal(err)
 	}
+}
+
+type arrayFlags []int
+
+func (i *arrayFlags) String() string {
+	if i == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v", []int(*i))
+}
+
+func (i *arrayFlags) Set(val string) error {
+	num, err := strconv.Atoi(val)
+	if err != nil {
+		return fmt.Errorf("couldn't parse user %s: %w", val, err)
+	}
+	*i = append(*i, num)
+	return nil
 }
