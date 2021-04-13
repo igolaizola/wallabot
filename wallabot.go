@@ -205,7 +205,6 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 	items := make(map[string]api.Item)
 	if err := b.db.Get(parsed.id, &items); err != nil {
 		b.log(err)
-		return
 	}
 	if len(items) == 0 {
 		// store search with empty items on db
