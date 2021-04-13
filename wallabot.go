@@ -204,13 +204,13 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 
 	items := make(map[string]api.Item)
 	if err := b.db.Get(parsed.id, &items); err != nil {
-		b.log(err)
+		log.Println(err)
+		items = make(map[string]api.Item)
 	}
 	if len(items) == 0 {
 		// store search with empty items on db
 		if err := b.db.Put(parsed.id, items); err != nil {
-		  log.Println(err)
-			items = make(map[string]api.Item)
+		  b.log(err)
 			return
 		}
 		if err := b.client.Search(parsed.query, items, func(api.Item) error { return nil }); err != nil {
