@@ -74,18 +74,12 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		defer log.Println("search routine finished")
 		defer bot.wg.Done()
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
 			start := time.Now()
 			var keys []string
 			bot.searchs.Range(func(k interface{}, _ interface{}) bool {
 				keys = append(keys, k.(string))
 				return true
 			})
-
 			sort.Strings(keys)
 			for _, k := range keys {
 				log.Println(fmt.Sprintf("searching: %s", k))
@@ -106,6 +100,11 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			}
 			bot.elapsed = time.Since(start)
 			log.Println(fmt.Sprintf("elapsed: %s", bot.elapsed))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 
