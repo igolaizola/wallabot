@@ -56,10 +56,10 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	defer bot.log(fmt.Sprintf("wallabot stoped, bot %s", bot.Self.UserName))
 	defer bot.wg.Wait()
 
+	keys, err := db.Keys()
 	if err != nil {
 		bot.log(fmt.Errorf("couldn't get keys: %w", err))
 	}
-	keys, err := db.Keys()
 	for _, k := range keys {
 		if _, err := parseArgs(k, 0); err != nil {
 			bot.log(fmt.Errorf("couldn't parse key %s: %w", k, err))
@@ -112,6 +112,10 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	u := tgbot.NewUpdate(0)
 	u.Timeout = 60
 	updates, err := bot.GetUpdatesChan(u)
+	if err != nil {
+		bot.log(fmt.Errorf("couldn't get update chan: %w", err))
+		return err
+	}
 	for {
 		var update tgbot.Update
 		select {
@@ -217,7 +221,6 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 	}
 	if err := b.client.Search(parsed.query, items, func(i api.Item) error {
 		dupID := fmt.Sprintf("%s/%s/%.2f-%.2f", parsed.chat, i.ID, i.Price, i.PreviousPrice)
-		// TODO(igolaizola): sync this
 		if _, ok := b.dups.Load(dupID); ok {
 			return nil
 		}

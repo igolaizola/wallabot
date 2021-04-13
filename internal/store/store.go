@@ -52,10 +52,10 @@ func (s *Store) Keys() ([]string, error) {
 func (s *Store) Get(key string, val interface{}) error {
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("db"))
-		if v := b.Get([]byte(key)); v != nil {
+		if v := b.Get([]byte(key)); len(v) > 0 {
 			dec := gob.NewDecoder(bytes.NewReader(v))
 			if err := dec.Decode(val); err != nil {
-				return err
+				return fmt.Errorf("couldn't decode gob: %w", err)
 			}
 		}
 		return nil
@@ -71,7 +71,7 @@ func (s *Store) Put(key string, val interface{}) error {
 		var buf bytes.Buffer
 		enc := gob.NewEncoder(bufio.NewWriter(&buf))
 		if err := enc.Encode(val); err != nil {
-			return err
+			return fmt.Errorf("couldn't encode gob: %w", err)
 		}
 		return b.Put([]byte(key), buf.Bytes())
 	}); err != nil {
