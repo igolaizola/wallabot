@@ -99,7 +99,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				bot.search(ctx, parsed)
 			}
 			bot.elapsed = time.Since(start)
-			
+
 			select {
 			case <-ctx.Done():
 				return
@@ -204,13 +204,13 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 
 	items := make(map[string]api.Item)
 	if err := b.db.Get(parsed.id, &items); err != nil {
-		log.Println(err)
+		b.log(err)
 		items = make(map[string]api.Item)
 	}
 	if len(items) == 0 {
 		// store search with empty items on db
 		if err := b.db.Put(parsed.id, items); err != nil {
-		  b.log(err)
+			b.log(err)
 			return
 		}
 		if err := b.client.Search(parsed.query, items, func(api.Item) error { return nil }); err != nil {

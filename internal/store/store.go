@@ -3,7 +3,7 @@ package store
 import (
 	"bufio"
 	"bytes"
-	"encoding/gob"
+	"encoding/json"
 	"fmt"
 
 	"github.com/boltdb/bolt"
@@ -53,9 +53,9 @@ func (s *Store) Get(key string, val interface{}) error {
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("db"))
 		if v := b.Get([]byte(key)); len(v) > 0 {
-			dec := gob.NewDecoder(bytes.NewReader(v))
+			dec := json.NewDecoder(bytes.NewReader(v))
 			if err := dec.Decode(val); err != nil {
-				return fmt.Errorf("couldn't decode gob: %w", err)
+				return fmt.Errorf("couldn't decode: %w", err)
 			}
 		}
 		return nil
@@ -69,9 +69,9 @@ func (s *Store) Put(key string, val interface{}) error {
 	if err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("db"))
 		var buf bytes.Buffer
-		enc := gob.NewEncoder(bufio.NewWriter(&buf))
+		enc := json.NewEncoder(bufio.NewWriter(&buf))
 		if err := enc.Encode(val); err != nil {
-			return fmt.Errorf("couldn't encode gob: %w", err)
+			return fmt.Errorf("couldn't encode: %w", err)
 		}
 		return b.Put([]byte(key), buf.Bytes())
 	}); err != nil {
