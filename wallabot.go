@@ -34,11 +34,6 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	}
 	defer db.Close()
 
-	client := &http.Client{
-		Transport: &transport{
-			ctx: ctx,
-		},
-	}
 	botAPI, err := tgbot.NewBotAPI(token)
 	if err != nil {
 		return fmt.Errorf("couldn't create bot api: %w", err)
