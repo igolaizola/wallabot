@@ -39,7 +39,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			ctx: ctx,
 		},
 	}
-	botAPI, err := tgbot.NewBotAPIWithClient(token, client)
+	botAPI, err := tgbot.NewBotAPI(token)
 	if err != nil {
 		return fmt.Errorf("couldn't create bot api: %w", err)
 	}
@@ -289,6 +289,7 @@ func (b *bot) message(chat interface{}, text string) {
 	if _, err := b.Send(msg); err != nil {
 		b.log(fmt.Errorf("couldn't send message to %v: %w", chat, err))
 	}
+	<-time.After(100 * time.Millisecond)
 }
 
 func (b *bot) log(obj interface{}) {
@@ -297,6 +298,7 @@ func (b *bot) log(obj interface{}) {
 	if _, err := b.Send(tgbot.NewMessage(int64(b.admin), text)); err != nil {
 		log.Println(fmt.Errorf("couldn't send error to admin %d: %w", b.admin, err))
 	}
+	<-time.After(100 * time.Millisecond)
 }
 
 func newAdMessage(i api.Item, chat string) string {
@@ -315,21 +317,4 @@ func priceDownMessage(i api.Item, chat string) string {
 	}
 	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s%s",
 		i.Title, i.Price, i.PreviousPrice, i.Link, bottom)
-}
-
-type transport struct {
-	lock sync.Mutex
-	ctx  context.Context
-}
-
-func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
-	t.lock.Lock()
-	defer func() {
-		select {
-		case <-t.ctx.Done():
-		case <-time.After(100 * time.Millisecond):
-		}
-		t.lock.Unlock()
-	}()
-	return http.DefaultTransport.RoundTrip(r)
 }
