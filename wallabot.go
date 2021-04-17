@@ -126,10 +126,15 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		if update.Message == nil {
 			continue
 		}
+
+		// Print chat ID when added to a group or channel
+		bot.printChatID(update.Message)
+
 		user := int(update.Message.Chat.ID)
 		if _, ok := allowedUsers[user]; !ok {
 			continue
 		}
+
 		if update.Message.IsCommand() {
 			args := update.Message.CommandArguments()
 			switch update.Message.Command() {
@@ -167,6 +172,19 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				} else {
 					bot.stop(parsed)
 					bot.message(user, fmt.Sprintf("stopped %s", parsed.id))
+				}
+			case "export":
+				bot.export(user)
+			case "batch":
+				split := strings.Split(args, "\n")
+				for _, s := range split {
+					parsed, err := parseArgs(s, user)
+					if err != nil {
+						bot.message(user, err.Error())
+					} else {
+						bot.searchs.Store(parsed.id, struct{}{})
+					}
+					bot.message(user, fmt.Sprintf("searching %s", parsed.id))
 				}
 			}
 		}
@@ -270,6 +288,16 @@ func (b *bot) stop(parsed parsedArgs) {
 	}
 }
 
+func (b *bot) export(user int) {
+	var keys []string
+	b.searchs.Range(func(k interface{}, _ interface{}) bool {
+		keys = append(keys, k.(string))
+		return true
+	})
+	sort.Strings(keys)
+	b.message(user, fmt.Sprintf("/batch %s", strings.Join(keys, "\n")))
+}
+
 func (b *bot) message(chat interface{}, text string) {
 	var msg tgbot.MessageConfig
 	switch v := chat.(type) {
@@ -286,6 +314,27 @@ func (b *bot) message(chat interface{}, text string) {
 		b.log(fmt.Errorf("couldn't send message to %v: %w", chat, err))
 	}
 	<-time.After(100 * time.Millisecond)
+}
+
+func (b *bot) printChatID(msg *tgbot.Message) {
+	if msg.Chat.IsPrivate() {
+		return
+	}
+	newMembers := msg.NewChatMembers
+	if newMembers != nil {
+		for _, m := range *newMembers {
+			if m.ID == b.Self.ID {
+				admins, err := b.GetChatAdministrators(msg.Chat.ChatConfig())
+				if err != nil {
+					b.log(fmt.Errorf("couldn'r get admins for chat id %d: %w", msg.Chat.ID, err))
+					return
+				}
+				for _, a := range admins {
+					b.message(a.User.ID, fmt.Sprintf("bot added to %d %s %s", msg.Chat.ID, msg.Chat.Title, msg.Chat.UserName))
+				}
+			}
+		}
+	}
 }
 
 func (b *bot) log(obj interface{}) {
