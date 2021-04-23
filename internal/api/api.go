@@ -65,6 +65,14 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 			excludes = append(excludes, e)
 		}
 	}
+	var includes []string
+	for _, i := range strings.Split(keywords, "+") {
+		if i == "" {
+			continue
+		}
+		includes = append(includes, strings.Replace(i, "&", " ", -1))
+	}
+	keywords = strings.Replace(keywords, "&", "+", -1)
 	start := 0
 	for {
 		select {
@@ -72,7 +80,7 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 			return nil
 		default:
 		}
-		n, err := c.search(keywords, excludes, start, items, callback)
+		n, err := c.search(keywords, includes, excludes, start, items, callback)
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			continue
@@ -93,7 +101,7 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 
 var errBadGateway = errors.New("api: 502 bad gateway")
 
-func (c *Client) search(keywords string, excludes []string, start int, items map[string]Item, callback func(Item) error) (int, error) {
+func (c *Client) search(keywords string, includes, excludes []string, start int, items map[string]Item, callback func(Item) error) (int, error) {
 	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
 	r, err := c.client.Get(url)
 	if err != nil {
@@ -115,6 +123,13 @@ func (c *Client) search(keywords string, excludes []string, start int, items map
 		for _, e := range excludes {
 			if strings.Contains(strings.ToLower(obj.Title), strings.ToLower(e)) ||
 				strings.Contains(strings.ToLower(obj.Description), strings.ToLower(e)) {
+				skip = true
+				break
+			}
+		}
+		for _, i := range includes {
+			if !strings.Contains(strings.ToLower(obj.Title), strings.ToLower(i)) &&
+				!strings.Contains(strings.ToLower(obj.Description), strings.ToLower(i)) {
 				skip = true
 				break
 			}

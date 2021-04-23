@@ -37,7 +37,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	if err != nil {
 		return fmt.Errorf("couldn't create bot api: %w", err)
 	}
-	botAPI.Debug = true
+	//botAPI.Debug = true
 
 	users = append(users, admin)
 	allowedUsers := make(map[int]struct{})
