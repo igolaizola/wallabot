@@ -13,17 +13,18 @@ import (
 	tgbot "github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/igolaizola/wallabot/internal/api"
 	"github.com/igolaizola/wallabot/internal/store"
+	"github.com/patrickmn/go-cache"
 )
 
 type bot struct {
 	*tgbot.BotAPI
 	db      *store.Store
 	searchs sync.Map
-	dups    sync.Map
 	admin   int
 	client  *api.Client
 	wg      sync.WaitGroup
 	elapsed time.Duration
+	cache   *cache.Cache
 }
 
 func Run(ctx context.Context, token, dbPath string, admin int, users []int) error {
@@ -45,11 +46,15 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		allowedUsers[u] = struct{}{}
 	}
 
+	// Cache with expiration
+	cach := cache.New(6*time.Hour, 6*time.Hour)
+
 	bot := &bot{
 		BotAPI: botAPI,
 		db:     db,
 		client: api.New(ctx),
 		admin:  admin,
+		cache:  cach,
 	}
 
 	bot.log(fmt.Sprintf("wallabot started, bot %s", bot.Self.UserName))
@@ -237,8 +242,8 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 		}
 	}
 	if err := b.client.Search(parsed.query, items, func(i api.Item) error {
-		dupID := fmt.Sprintf("%s/%s/%.2f-%.2f", parsed.chat, i.ID, i.Price, i.PreviousPrice)
-		if _, ok := b.dups.Load(dupID); ok {
+		cacheID := fmt.Sprintf("%s/%s/%.2f-%.2f", parsed.chat, i.ID, i.Price, i.PreviousPrice)
+		if _, ok := b.cache.Get(cacheID); ok {
 			return nil
 		}
 		text := newAdMessage(i, parsed.chat)
@@ -246,7 +251,7 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 			text = priceDownMessage(i, parsed.chat)
 		}
 		b.message(parsed.chat, text)
-		b.dups.Store(dupID, struct{}{})
+		b.cache.Set(cacheID, struct{}{}, cache.DefaultExpiration)
 		return nil
 	}); err != nil {
 		b.log(err)
