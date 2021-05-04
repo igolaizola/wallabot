@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/igolaizola/wallabot/internal/geo"
 )
 
 type Item struct {
@@ -55,7 +59,33 @@ func New(ctx context.Context) *Client {
 func (c *Client) Search(query string, items map[string]Item, callback func(Item) error) error {
 	keywords := query
 	var excludes []string
-	split := strings.SplitN(query, ":", 2)
+	var code, km int
+	var min, max int
+	split := strings.SplitN(query, "?", 2)
+	if len(split) > 1 {
+		query = split[0]
+		values, err := url.ParseQuery(split[1])
+		if err != nil {
+			return fmt.Errorf("api: couldn't parse query %s", split[1])
+		}
+		code, err = fromValues(values, "code")
+		if err != nil {
+			return err
+		}
+		km, err = fromValues(values, "km")
+		if err != nil {
+			return err
+		}
+		min, err = fromValues(values, "min")
+		if err != nil {
+			return err
+		}
+		max, err = fromValues(values, "max")
+		if err != nil {
+			return err
+		}
+	}
+	split = strings.SplitN(query, ":", 2)
 	if len(split) > 1 {
 		keywords = split[0]
 		for _, e := range strings.Split(split[1], "+") {
@@ -80,7 +110,7 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 			return nil
 		default:
 		}
-		n, err := c.search(keywords, includes, excludes, start, items, callback)
+		n, err := c.search(keywords, includes, excludes, code, km, min, max, start, items, callback)
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			continue
@@ -101,9 +131,31 @@ func (c *Client) Search(query string, items map[string]Item, callback func(Item)
 
 var errBadGateway = errors.New("api: 502 bad gateway")
 
-func (c *Client) search(keywords string, includes, excludes []string, start int, items map[string]Item, callback func(Item) error) (int, error) {
-	url := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?keywords=%s&order_by=newest&start=%d", keywords, start)
-	r, err := c.client.Get(url)
+func (c *Client) search(keywords string, includes, excludes []string, code, km, min, max, start int, items map[string]Item, callback func(Item) error) (int, error) {
+	values := url.Values{}
+	values.Set("keywords", keywords)
+	values.Set("order_by", "newest")
+	values.Set("start", strconv.Itoa(start))
+	values.Encode()
+	if code > 0 {
+		lat, long, ok := geo.LatLong(code)
+		if !ok {
+			return 0, fmt.Errorf("api: lat long not found for %d", code)
+		}
+		values.Set("latitude", fmt.Sprintf("%.5f", lat))
+		values.Set("longitude", fmt.Sprintf("%.5f", long))
+		if km > 0 {
+			values.Set("distance", strconv.Itoa(km*1000))
+		}
+	}
+	if min > 0 {
+		values.Set("min_sale_price", strconv.Itoa(min))
+	}
+	if max > 0 {
+		values.Set("max_sale_price", strconv.Itoa(max))
+	}
+	u := fmt.Sprintf("https://api.wallapop.com/api/v3/general/search?%s", values.Encode())
+	r, err := c.client.Get(u)
 	if err != nil {
 		return 0, fmt.Errorf("api: get request failed: %w", err)
 	}
@@ -160,6 +212,18 @@ func (c *Client) search(keywords string, includes, excludes []string, start int,
 
 	}
 	return len(resp.Objects), nil
+}
+
+func fromValues(values url.Values, key string) (int, error) {
+	t := values.Get(key)
+	if t == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(t)
+	if err != nil {
+		return 0, fmt.Errorf("api: couldn't parse int %s", t)
+	}
+	return v, nil
 }
 
 type transport struct {
