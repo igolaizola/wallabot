@@ -40,12 +40,6 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 	}
 	//botAPI.Debug = true
 
-	users = append(users, admin)
-	allowedUsers := make(map[int]struct{})
-	for _, u := range users {
-		allowedUsers[u] = struct{}{}
-	}
-
 	// Cache with expiration
 	cach := cache.New(6*time.Hour, 6*time.Hour)
 
@@ -57,16 +51,30 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		cache:  cach,
 	}
 
+	users = append(users, admin)
+	userChats := make(map[int]string)
+	for _, u := range users {
+		userChats[u] = strconv.Itoa(u)
+		var chat string
+		if err := db.Get("config", strconv.Itoa(u), &chat); err != nil {
+			bot.log(fmt.Errorf("couldn't get config for %d: %w", u, err))
+			continue
+		}
+		if chat != "" {
+			userChats[u] = chat
+		}
+	}
+
 	bot.log(fmt.Sprintf("wallabot started, bot %s", bot.Self.UserName))
 	defer bot.log(fmt.Sprintf("wallabot stoped, bot %s", bot.Self.UserName))
 	defer bot.wg.Wait()
 
-	keys, err := db.Keys()
+	keys, err := db.Keys("db")
 	if err != nil {
 		bot.log(fmt.Errorf("couldn't get keys: %w", err))
 	}
 	for _, k := range keys {
-		if _, err := parseArgs(k, 0); err != nil {
+		if _, err := parseArgs(k, ""); err != nil {
 			bot.log(fmt.Errorf("couldn't parse key %s: %w", k, err))
 			continue
 		}
@@ -96,7 +104,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				if _, ok := bot.searchs.Load(k); !ok {
 					continue
 				}
-				parsed, err := parseArgs(k, 0)
+				parsed, err := parseArgs(k, "")
 				if err != nil {
 					bot.log(fmt.Errorf("couldn't parse key %s: %w", k, err))
 					continue
@@ -160,7 +168,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		}
 
 		// Check if user is valid
-		if _, ok := allowedUsers[user]; !ok {
+		if _, ok := userChats[user]; !ok {
 			continue
 		}
 
@@ -169,12 +177,22 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		}
 
 		switch command {
+		case "chat":
+			if args == "" {
+				bot.message(user, fmt.Sprintf("current chat id for searchs: %s", userChats[user]))
+				break
+			}
+			userChats[user] = args
+			if err := db.Put("config", strconv.Itoa(user), args); err != nil {
+				bot.log(fmt.Errorf("couldn't get config for %d: %w", u, err))
+			}
+			bot.message(user, fmt.Sprintf("chat id for searchs updated: %s", args))
 		case "search":
 			if args == "" {
 				bot.message(user, "search arguments not provided")
 				continue
 			}
-			parsed, err := parseArgs(args, user)
+			parsed, err := parseArgs(args, userChats[user])
 			if err != nil {
 				bot.message(user, err.Error())
 			} else {
@@ -197,7 +215,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				bot.message(user, "stop arguments not provided")
 				continue
 			}
-			parsed, err := parseArgs(args, user)
+			parsed, err := parseArgs(args, userChats[user])
 			if err != nil {
 				bot.message(user, err.Error())
 			}
@@ -213,7 +231,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		case "batch":
 			split := strings.Split(args, "\n")
 			for _, s := range split {
-				parsed, err := parseArgs(s, user)
+				parsed, err := parseArgs(s, userChats[user])
 				if err != nil {
 					bot.message(user, err.Error())
 				} else {
@@ -231,10 +249,10 @@ type parsedArgs struct {
 	query string
 }
 
-func parseArgs(args string, user int) (parsedArgs, error) {
+func parseArgs(args string, chat string) (parsedArgs, error) {
 	split := strings.Split(args, "/")
 	p := parsedArgs{
-		chat:  strconv.Itoa(user),
+		chat:  chat,
 		query: split[0],
 	}
 	switch len(split) {
@@ -244,7 +262,7 @@ func parseArgs(args string, user int) (parsedArgs, error) {
 		p.query = split[1]
 	}
 	p.chat = strings.ToLower(strings.Trim(p.chat, " "))
-	p.query = strings.ReplaceAll(strings.Trim(strings.ToLower(p.query), " "), " ", "+")
+	p.query = strings.ReplaceAll(strings.Trim(p.query, " "), " ", "+")
 	p.id = fmt.Sprintf("%s/%s", p.chat, p.query)
 	return p, nil
 }
@@ -255,13 +273,13 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 	}
 
 	items := make(map[string]api.Item)
-	if err := b.db.Get(parsed.id, &items); err != nil {
+	if err := b.db.Get("db", parsed.id, &items); err != nil {
 		b.log(err)
 		items = make(map[string]api.Item)
 	}
 	if len(items) == 0 {
 		// store search with empty items on db
-		if err := b.db.Put(parsed.id, items); err != nil {
+		if err := b.db.Put("db", parsed.id, items); err != nil {
 			b.log(err)
 			return
 		}
@@ -291,7 +309,7 @@ func (b *bot) search(ctx context.Context, parsed parsedArgs) {
 	if _, ok := b.searchs.Load(parsed.id); !ok {
 		return
 	}
-	if err := b.db.Put(parsed.id, items); err != nil {
+	if err := b.db.Put("db", parsed.id, items); err != nil {
 		b.log(err)
 		return
 	}
@@ -307,7 +325,7 @@ func (b *bot) stopAll() {
 	for _, k := range keys {
 		b.log(fmt.Sprintf("stopping %s", k))
 		b.searchs.Delete(k)
-		if err := b.db.Delete(k); err != nil {
+		if err := b.db.Delete("db", k); err != nil {
 			b.log(err)
 		}
 	}
@@ -316,7 +334,7 @@ func (b *bot) stop(parsed parsedArgs) {
 	if _, ok := b.searchs.Load(parsed.id); ok {
 		b.log(fmt.Sprintf("stopping %s", parsed.id))
 		b.searchs.Delete(parsed.id)
-		if err := b.db.Delete(parsed.id); err != nil {
+		if err := b.db.Delete("db", parsed.id); err != nil {
 			b.log(err)
 		}
 	}
