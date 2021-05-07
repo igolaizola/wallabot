@@ -209,11 +209,13 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			bot.message(user, "status info:")
 			bot.searchs.Range(func(k interface{}, _ interface{}) bool {
 				key := k.(string)
+				/*
 				data := hex.EncodeToString([]byte(fmt.Sprintf("/stop %s", key)))
 				btns := []tgbot.InlineKeyboardButton{
 					tgbot.NewInlineKeyboardButtonData("stop", data),
 				}
-				bot.messageOpts(user, fmt.Sprintf("%s", key), false, btns)
+				*/
+				bot.messageOpts(user, fmt.Sprintf("%s", key), false, nil)
 				return true
 			})
 			bot.log(fmt.Sprintf("elapsed: %s", bot.elapsed))
