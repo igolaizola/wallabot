@@ -2,7 +2,7 @@ package wallabot
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -145,7 +145,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		// Extract command from callback
 		if update.CallbackQuery != nil {
 			user = int(update.CallbackQuery.From.ID)
-			b, err := base64.URLEncoding.DecodeString(update.CallbackQuery.Data)
+			b, err := hex.DecodeString(update.CallbackQuery.Data)
 			if err != nil {
 				bot.log(err)
 			}
@@ -209,7 +209,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			bot.message(user, "status info:")
 			bot.searchs.Range(func(k interface{}, _ interface{}) bool {
 				key := k.(string)
-				data := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("/stop %s", key)))
+				data := hex.EncodeToString([]byte(fmt.Sprintf("/stop %s", key)))
 				btns := []tgbot.InlineKeyboardButton{
 					tgbot.NewInlineKeyboardButtonData("stop", data),
 				}
