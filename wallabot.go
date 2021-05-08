@@ -2,7 +2,8 @@ package wallabot
 
 import (
 	"context"
-	"encoding/hex"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"sort"
@@ -26,6 +27,7 @@ type bot struct {
 	wg      sync.WaitGroup
 	elapsed time.Duration
 	cache   *cache.Cache
+	hash    map[string]string
 }
 
 func Run(ctx context.Context, token, dbPath string, admin int, users []int) error {
@@ -50,6 +52,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		client: api.New(ctx),
 		admin:  admin,
 		cache:  cach,
+		hash:   make(map[string]string),
 	}
 
 	users = append(users, admin)
@@ -80,6 +83,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			continue
 		}
 		bot.searchs.Store(k, struct{}{})
+		bot.hash[sha(k)] = k
 		bot.log(fmt.Sprintf("loaded from db: %s", k))
 	}
 
@@ -145,11 +149,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 		// Extract command from callback
 		if update.CallbackQuery != nil {
 			user = int(update.CallbackQuery.From.ID)
-			b, err := hex.DecodeString(update.CallbackQuery.Data)
-			if err != nil {
-				bot.log(err)
-			}
-			data := string(b)
+			data := update.CallbackQuery.Data
 			if _, err := bot.AnswerCallbackQuery(tgbot.NewCallback(update.CallbackQuery.ID, "")); err != nil {
 				bot.log(err)
 				continue
@@ -157,7 +157,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 			split := strings.SplitN(data, " ", 2)
 			command = strings.TrimPrefix(split[0], "/")
 			if len(split) > 1 {
-				args = split[1]
+				args = bot.hash[split[1]]
 			}
 		}
 
@@ -203,19 +203,18 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 				bot.message(user, err.Error())
 			} else {
 				bot.searchs.Store(parsed.id, struct{}{})
+				bot.hash[sha(parsed.id)] = parsed.id
 			}
 			bot.message(user, fmt.Sprintf("searching %s", parsed.id))
 		case "status":
 			bot.message(user, "status info:")
 			bot.searchs.Range(func(k interface{}, _ interface{}) bool {
 				key := k.(string)
-				/*
-				data := hex.EncodeToString([]byte(fmt.Sprintf("/stop %s", key)))
+				data := fmt.Sprintf("/stop %s", sha(key))
 				btns := []tgbot.InlineKeyboardButton{
 					tgbot.NewInlineKeyboardButtonData("stop", data),
 				}
-				*/
-				bot.messageOpts(user, fmt.Sprintf("%s", key), false, nil)
+				bot.messageOpts(user, fmt.Sprintf("%s", key), false, btns)
 				return true
 			})
 			bot.log(fmt.Sprintf("elapsed: %s", bot.elapsed))
@@ -245,6 +244,7 @@ func Run(ctx context.Context, token, dbPath string, admin int, users []int) erro
 					bot.message(user, err.Error())
 				} else {
 					bot.searchs.Store(parsed.id, struct{}{})
+					bot.hash[sha(parsed.id)] = parsed.id
 				}
 				bot.message(user, fmt.Sprintf("searching %s", parsed.id))
 			}
@@ -334,6 +334,7 @@ func (b *bot) stopAll() {
 	for _, k := range keys {
 		b.log(fmt.Sprintf("stopping %s", k))
 		b.searchs.Delete(k)
+		delete(b.hash, sha(k))
 		if err := b.db.Delete("db", k); err != nil {
 			b.log(err)
 		}
@@ -343,6 +344,7 @@ func (b *bot) stop(parsed parsedArgs) {
 	if _, ok := b.searchs.Load(parsed.id); ok {
 		b.log(fmt.Sprintf("stopping %s", parsed.id))
 		b.searchs.Delete(parsed.id)
+		delete(b.hash, sha(parsed.id))
 		if err := b.db.Delete("db", parsed.id); err != nil {
 			b.log(err)
 		}
@@ -431,4 +433,9 @@ func priceDownMessage(i api.Item, chat string) string {
 	}
 	return fmt.Sprintf("⚡️ BAJADA DE PRECIO\n\n%s\n\n✅ Precio: %.2f€\n🚫 Anterior: %.2f€\n\n🔗 %s%s",
 		i.Title, i.Price, i.PreviousPrice, i.Link, bottom)
+}
+
+func sha(s string) string {
+	h := sha1.Sum([]byte(s))
+	return base64.StdEncoding.EncodeToString(h[:])
 }
